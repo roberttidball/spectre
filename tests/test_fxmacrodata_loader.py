@@ -47,6 +47,44 @@ class TestFXMacroDataLoader(unittest.TestCase):
         self.assertEqual(df.index.get_level_values("asset").unique()[0], "EUR/USD")
         self.assertEqual(list(df["close"]), [1.1, 1.2])
 
+    def test_fetch_follows_pagination(self):
+        pages = {
+            0: {
+                "data": [{"date": "2026-01-02", "val": 1.2}],
+                "pagination": {"has_more": True, "next_offset": 1},
+            },
+            1: {
+                "data": [{"date": "2026-01-01", "val": 1.1}],
+                "pagination": {"has_more": False, "next_offset": None},
+            },
+        }
+
+        class MockResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self.payload
+
+        class MockSession:
+            def __init__(self):
+                self.offsets = []
+
+            def get(self, url, params, headers, timeout):
+                self.offsets.append((params["limit"], params["offset"]))
+                return MockResponse(pages[params["offset"]])
+
+        session = MockSession()
+        df = FXMacroDataLoader.fetch(
+            "EURUSD", "2026-01-01", "2026-01-02", session=session
+        )
+
+        self.assertEqual(session.offsets, [(100, 0), (100, 1)])
+        self.assertEqual(list(df["close"]), [1.1, 1.2])
+
     def test_loader_returns_spectre_formatted_data(self):
         class MockResponse:
             def raise_for_status(self):

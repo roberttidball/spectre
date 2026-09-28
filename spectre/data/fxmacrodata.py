@@ -10,6 +10,9 @@ from .dataloader import DataLoader
 
 
 FXMACRODATA_API_ROOT = "https://api.fxmacrodata.com/v1"
+# The API returns at most 100 rows per request, newest first.
+PAGE_LIMIT = 100
+MAX_PAGES = 1000
 
 
 def _split_pair(pair):
@@ -87,16 +90,31 @@ class FXMacroDataLoader(DataLoader):
         base, quote = _split_pair(pair)
         api_key = api_key or os.environ.get("FXMACRODATA_API_KEY")
         headers = {"X-API-Key": api_key} if api_key else {}
-        params = {
-            "start_date": start_date,
-            "end_date": end_date,
-            "limit": 5000,
-        }
         client = session or requests
         url = "{}/forex/{}/{}".format(api_root.rstrip("/"), base, quote)
-        response = client.get(url, params=params, headers=headers, timeout=30)
-        response.raise_for_status()
-        rows = response.json().get("data", [])
+        rows = []
+        offset = 0
+        for _ in range(MAX_PAGES):
+            params = {
+                "start_date": start_date,
+                "end_date": end_date,
+                "limit": PAGE_LIMIT,
+                "offset": offset,
+            }
+            response = client.get(url, params=params, headers=headers, timeout=30)
+            response.raise_for_status()
+            payload = response.json()
+            page = payload.get("data") or []
+            rows.extend(page)
+            pagination = payload.get("pagination") or {}
+            if not page or not pagination.get("has_more"):
+                break
+            next_offset = pagination.get("next_offset")
+            if next_offset is None:
+                next_offset = offset + len(page)
+            if next_offset <= offset:
+                break
+            offset = next_offset
 
         records = []
         asset = "{}/{}".format(base, quote)
