@@ -22,6 +22,25 @@ def _split_pair(pair):
     return pair[:3], pair[3:]
 
 
+def _clean_api_key(api_key):
+    if not api_key:
+        return None
+    api_key = str(api_key).strip()
+    if any(char.isspace() or not char.isprintable() for char in api_key):
+        # Keep the key itself out of the message.
+        raise ValueError("FXMacroData API key contains whitespace or control characters")
+    return api_key or None
+
+
+def _page_rows(payload):
+    if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+        return payload["data"]
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    raise ValueError(
+        "Unexpected FXMacroData response{}".format(": {}".format(detail) if detail else "")
+    )
+
+
 class FXMacroDataLoader(DataLoader):
     """Load FXMacroData daily reference rates as Spectre OHLCV data.
 
@@ -88,7 +107,7 @@ class FXMacroDataLoader(DataLoader):
         session=None,
     ):
         base, quote = _split_pair(pair)
-        api_key = api_key or os.environ.get("FXMACRODATA_API_KEY")
+        api_key = _clean_api_key(api_key or os.environ.get("FXMACRODATA_API_KEY"))
         headers = {"X-API-Key": api_key} if api_key else {}
         client = session or requests
         url = "{}/forex/{}/{}".format(api_root.rstrip("/"), base, quote)
@@ -101,10 +120,24 @@ class FXMacroDataLoader(DataLoader):
                 "limit": PAGE_LIMIT,
                 "offset": offset,
             }
-            response = client.get(url, params=params, headers=headers, timeout=30)
+            # Redirects are not followed so the key header is never forwarded
+            # to another host.
+            response = client.get(
+                url, params=params, headers=headers, timeout=30, allow_redirects=False
+            )
+            if 300 <= response.status_code < 400:
+                raise requests.HTTPError(
+                    "FXMacroData returned an unexpected redirect (HTTP {})".format(
+                        response.status_code
+                    ),
+                    response=response,
+                )
             response.raise_for_status()
-            payload = response.json()
-            page = payload.get("data") or []
+            try:
+                payload = response.json()
+            except ValueError:
+                raise ValueError("FXMacroData returned a non-JSON response") from None
+            page = _page_rows(payload)
             rows.extend(page)
             pagination = payload.get("pagination") or {}
             if not page or not pagination.get("has_more"):
@@ -119,7 +152,12 @@ class FXMacroDataLoader(DataLoader):
         records = []
         asset = "{}/{}".format(base, quote)
         for row in rows:
-            value = float(row["val"])
+            if not isinstance(row, dict) or row.get("val") is None or not row.get("date"):
+                continue
+            try:
+                value = float(row["val"])
+            except (TypeError, ValueError):
+                continue
             records.append(
                 {
                     "date": pd.to_datetime(row["date"]),

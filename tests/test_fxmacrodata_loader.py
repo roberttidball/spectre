@@ -1,6 +1,7 @@
 import unittest
 
 import pandas as pd
+import requests
 
 from spectre.data import FXMacroDataLoader
 
@@ -9,6 +10,8 @@ class TestFXMacroDataLoader(unittest.TestCase):
 
     def test_fetch_formats_fxmacrodata_rows(self):
         class MockResponse:
+            status_code = 200
+
             def raise_for_status(self):
                 pass
 
@@ -24,7 +27,7 @@ class TestFXMacroDataLoader(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def get(self, url, params, headers, timeout):
+            def get(self, url, params, headers, timeout, **kwargs):
                 self.calls.append((url, params, headers, timeout))
                 return MockResponse()
 
@@ -60,6 +63,8 @@ class TestFXMacroDataLoader(unittest.TestCase):
         }
 
         class MockResponse:
+            status_code = 200
+
             def __init__(self, payload):
                 self.payload = payload
 
@@ -73,7 +78,7 @@ class TestFXMacroDataLoader(unittest.TestCase):
             def __init__(self):
                 self.offsets = []
 
-            def get(self, url, params, headers, timeout):
+            def get(self, url, params, headers, timeout, **kwargs):
                 self.offsets.append((params["limit"], params["offset"]))
                 return MockResponse(pages[params["offset"]])
 
@@ -87,6 +92,8 @@ class TestFXMacroDataLoader(unittest.TestCase):
 
     def test_loader_returns_spectre_formatted_data(self):
         class MockResponse:
+            status_code = 200
+
             def raise_for_status(self):
                 pass
 
@@ -94,7 +101,7 @@ class TestFXMacroDataLoader(unittest.TestCase):
                 return {"data": [{"date": "2026-01-01", "val": 1.1}]}
 
         class MockSession:
-            def get(self, url, params, headers, timeout):
+            def get(self, url, params, headers, timeout, **kwargs):
                 return MockResponse()
 
         loader = FXMacroDataLoader(
@@ -108,6 +115,58 @@ class TestFXMacroDataLoader(unittest.TestCase):
         self.assertIsInstance(df, pd.DataFrame)
         self.assertEqual(df.index.names, ["date", "asset"])
         self.assertIn("volume", df.columns)
+
+
+    def test_fetch_does_not_follow_redirects(self):
+        class MockResponse:
+            status_code = 302
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {}
+
+        class MockSession:
+            def __init__(self):
+                self.kwargs = None
+
+            def get(self, url, params, headers, timeout, **kwargs):
+                self.kwargs = kwargs
+                return MockResponse()
+
+        session = MockSession()
+        with self.assertRaises(requests.HTTPError):
+            FXMacroDataLoader.fetch(
+                "EURUSD", "2026-01-01", "2026-01-02", api_key="test-key", session=session
+            )
+        self.assertIs(session.kwargs.get("allow_redirects"), False)
+
+    def test_invalid_api_key_error_does_not_include_key(self):
+        with self.assertRaises(ValueError) as ctx:
+            FXMacroDataLoader.fetch(
+                "EURUSD", "2026-01-01", "2026-01-02", api_key="test\nkey", session=object()
+            )
+        self.assertNotIn("test", str(ctx.exception))
+
+    def test_error_body_raises_clean_error(self):
+        class MockResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"detail": "Invalid API key"}
+
+        class MockSession:
+            def get(self, url, params, headers, timeout, **kwargs):
+                return MockResponse()
+
+        with self.assertRaisesRegex(ValueError, "Invalid API key"):
+            FXMacroDataLoader.fetch(
+                "EURUSD", "2026-01-01", "2026-01-02", session=MockSession()
+            )
 
 
 if __name__ == "__main__":
